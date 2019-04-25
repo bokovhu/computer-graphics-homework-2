@@ -158,6 +158,7 @@ void hitSphere ( in Ray ray, in Sphere sphere, out Hit hit ) {
 	
 }
 
+// Source: https://stackoverflow.com/questions/52130939/ray-vs-ellipsoid-intersection
 void hitEllipsoid (in Ray ray, in Ellipsoid ellipsoid, out Hit hit) {
 
 	hit.didHit = false;
@@ -189,6 +190,7 @@ void hitEllipsoid (in Ray ray, in Ellipsoid ellipsoid, out Hit hit) {
 
 }
 
+// Source: https://www.scratchapixel.com/lessons/3d-basic-rendering/minimal-ray-tracer-rendering-simple-shapes/ray-plane-and-ray-disk-intersection
 void hitPlane ( in Ray ray, in Plane plane, out Hit hit ) {
 
 	hit.didHit = false;
