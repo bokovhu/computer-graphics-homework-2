@@ -78,6 +78,12 @@ struct Sphere {
 	int materialId;
 };
 
+struct Ellipsoid {
+	vec3 center;
+	vec3 radius;
+	int materialId;
+};
+
 struct Plane {
 	vec3 point;
 	vec3 normal;
@@ -86,6 +92,7 @@ struct Plane {
 
 struct Material {
 	bool isReflective;
+	bool isRough;
 	vec3 ambient;
 	vec3 diffuse;
 	vec3 specular;
@@ -102,12 +109,15 @@ uniform struct {
 
 const int maxNumMaterials = 10;
 const int maxNumSpheres = 10;
+const int maxNumEllipsoids = 10;
 const int maxBounces = 64;
 const float epsilon = 0.001;
 
 uniform Material materials [maxNumMaterials];
 uniform Sphere spheres [maxNumSpheres];
+uniform Ellipsoid ellipsoids [maxNumEllipsoids];
 uniform int numSpheres;
+uniform int numEllipsoids;
 uniform int numMirrorSides = 3;
 
 uniform int mirrorMaterialId = 0;
@@ -148,6 +158,37 @@ void hitSphere ( in Ray ray, in Sphere sphere, out Hit hit ) {
 	
 }
 
+void hitEllipsoid (in Ray ray, in Ellipsoid ellipsoid, out Hit hit) {
+
+	hit.didHit = false;
+	hit.rayOrigin = ray.origin;
+	hit.rayDirection = ray.direction;
+
+	mat3 q;
+	q [0][0] = ellipsoid.radius.x;
+	q [1][1] = ellipsoid.radius.y;
+	q [2][2] = ellipsoid.radius.z;
+	mat3 qInv = inverse(q);
+
+	Ray newRay;
+	newRay.origin = qInv * (ray.origin - ellipsoid.center);
+	newRay.direction = normalize (qInv * ray.direction);
+
+	Hit sphereHit;
+	hitSphere (newRay, Sphere (vec3 (0.), 1., ellipsoid.materialId), sphereHit);
+
+	hit.didHit = sphereHit.didHit;
+	hit.hitPoint = q * sphereHit.hitPoint + ellipsoid.center;
+	hit.hitNormal = sphereHit.hitNormal;
+	hit.hitNormal.x /= pow (ellipsoid.radius.x, 2.0);
+	hit.hitNormal.y /= pow (ellipsoid.radius.y, 2.0);
+	hit.hitNormal.z /= pow (ellipsoid.radius.z, 2.0);
+	hit.hitNormal = normalize (hit.hitNormal);
+	hit.hitMaterialId = sphereHit.hitMaterialId;
+	hit.hitDistance = length (ray.origin - hit.hitPoint);
+
+}
+
 void hitPlane ( in Ray ray, in Plane plane, out Hit hit ) {
 
 	hit.didHit = false;
@@ -156,7 +197,7 @@ void hitPlane ( in Ray ray, in Plane plane, out Hit hit ) {
     hit.rayDirection = ray.direction;
     
     float denom = dot(plane.normal, ray.direction);
-    if (denom > 0.001) {
+    if (abs (denom) > 0.001) {
         vec3 diff = plane.point - ray.origin;
         float t = dot (diff, plane.normal) / denom;
         
@@ -232,6 +273,18 @@ void trace ( in Ray ray, out Hit hit ) {
 			}
 		}
 	}
+
+	for (int i = 0; i < numEllipsoids; i++) {
+		Hit ellipsoidHit;
+		hitEllipsoid (ray, ellipsoids [i], ellipsoidHit);
+
+		if (ellipsoidHit.didHit) {
+			if (!hit.didHit || hit.hitDistance > ellipsoidHit.hitDistance) {
+				hit = ellipsoidHit;
+			}
+		}
+
+	}
 	
 	Hit caleidoscopeWallHit;
 	hitCaleidoscopeWalls (ray, caleidoscopeWallHit);
@@ -282,16 +335,45 @@ vec4 calculate ( in vec2 ndc, in float aspect, in vec3 eye ) {
 		Ray ray = primaryRay;
 		Hit hit = primaryHit;
 
-		bool didBreak = false;
-
 		for (int i = 0; i < maxBounces; i++) {
 
 			if (!hit.didHit) {
-				radiance = reflectionWeight * light.ambient;
 				break;
 			}
 
 			Material material = materials [hit.hitMaterialId];
+
+			if (material.isRough) {
+
+				radiance += reflectionWeight * material.ambient * light.ambient;
+
+				Ray shadowRay = Ray ( 
+					hit.hitPoint + hit.hitNormal * 0.001,
+					light.direction
+				);
+				Hit shadowHit;
+				trace (shadowRay, shadowHit);
+
+				if (!shadowHit.didHit) {
+
+					float cosTheta = dot (hit.hitNormal, light.direction);
+
+					if (cosTheta > 0.0) {
+
+						radiance += reflectionWeight * light.energy * material.diffuse * cosTheta;
+
+						vec3 halfway = normalize (-hit.rayDirection + light.direction);
+						float cosDelta = dot (hit.hitNormal, halfway);
+
+						if (cosDelta > 0.0) {
+							radiance += reflectionWeight * light.energy * material.specular * pow (cosDelta, material.shininess);
+						}
+
+					}
+
+				}
+
+			}
 
 			if (material.isReflective) {
 
@@ -302,33 +384,13 @@ vec4 calculate ( in vec2 ndc, in float aspect, in vec3 eye ) {
 				);
 				trace (ray, hit);
 				
-			} else {
-
-				radiance += reflectionWeight * material.ambient * light.ambient;
-
-				float cosTheta = dot (hit.hitNormal, -light.direction);
-
-				if (cosTheta > 0.0) {
-
-					radiance += reflectionWeight * light.energy * material.diffuse * cosTheta;
-
-					vec3 halfway = normalize (-hit.rayDirection - light.direction);
-					float cosDelta = dot (hit.hitNormal, halfway);
-
-					if (cosDelta > 0.0) {
-						radiance += reflectionWeight * light.energy * material.specular * pow (cosDelta, material.shininess);
-					}
-
-				}
-
-				break;
-			}
+			} else break;
 
 		}
 
 	}
 
-	return vec4 (radiance / 5.0, 1.0);
+	return vec4 (pow (radiance, vec3 (1. / 2.2)), 1.0);
 	
 }
 
@@ -345,6 +407,7 @@ void main() {
 )";
 
 GPUProgram gpuProgram;
+const float boundarySphereRadius = 1.0;
 
 struct Light {
 
@@ -370,6 +433,7 @@ struct Light {
 struct Sphere {
 
 	vec3 center;
+	vec3 velocity;
 	float radius;
 	int materialId;
 
@@ -400,9 +464,41 @@ struct Sphere {
 
 };
 
+struct Ellipsoid {
+
+	vec3 center;
+	vec3 velocity;
+	vec3 radius;
+	int materialId;
+
+	void SetUniforms (
+		unsigned int programId,
+		char* nameTemplate,
+		int sphereId
+	) {
+
+		char uniformName [256];
+
+		sprintf (uniformName, nameTemplate, sphereId, "center");
+		center.SetUniform (programId, uniformName);
+
+		sprintf (uniformName, nameTemplate, sphereId, "radius");
+		radius.SetUniform (programId, uniformName);
+		
+		sprintf (uniformName, nameTemplate, sphereId, "materialId");
+		int location = glGetUniformLocation (programId, uniformName);
+		if (location >= 0) {
+			glUniform1i (location, materialId);
+		}
+
+	}
+
+};
+
 struct Material {
 
 	bool isReflective;
+	bool isRough;
 	vec3 ambient;
 	vec3 diffuse;
 	vec3 specular;
@@ -422,6 +518,12 @@ struct Material {
 		int location = glGetUniformLocation (programId, uniformName);
 		if (location >= 0) {
 			glUniform1i (location, isReflective ? 1 : 0);
+		}
+
+		sprintf (uniformName, nameTemplate, materialId, "isRough");
+		location = glGetUniformLocation (programId, uniformName);
+		if (location >= 0) {
+			glUniform1i (location, isRough ? 1 : 0);
 		}
 
 		sprintf (uniformName, nameTemplate, materialId, "ambient");
@@ -465,6 +567,7 @@ struct RayTracingGame {
 
 	std::vector <Material> materials;
 	std::vector <Sphere> spheres;
+	std::vector <Ellipsoid> ellipsoids;
 	Light light;
 
 	int mirrorMaterialId = 0;
@@ -474,6 +577,7 @@ struct RayTracingGame {
 
 		Material goldMaterial;
 		goldMaterial.isReflective = true;
+		goldMaterial.isRough = false;
 		goldMaterial.n = vec3 (0.17, 0.35, 1.5);
 		goldMaterial.k = vec3 (3.1, 2.7, 1.9);
 
@@ -481,6 +585,7 @@ struct RayTracingGame {
 
 		Material silverMaterial;
 		silverMaterial.isReflective = true;
+		silverMaterial.isRough = false;
 		silverMaterial.n = vec3 (0.14, 0.16, 0.13);
 		silverMaterial.k = vec3 (4.1, 2.3, 3.1);
 
@@ -488,6 +593,7 @@ struct RayTracingGame {
 
 		Material whiteMaterial;
 		whiteMaterial.isReflective = false;
+		whiteMaterial.isRough = true;
 		whiteMaterial.ambient = vec3 (1.0, 1.0, 1.0);
 		whiteMaterial.diffuse = vec3 (1.0, 1.0, 1.0);
 		whiteMaterial.specular = vec3 (0.0, 0.0, 0.0);
@@ -498,9 +604,10 @@ struct RayTracingGame {
 
 			Material randomDiffuseMaterial;
 			randomDiffuseMaterial.isReflective = false;
+			randomDiffuseMaterial.isRough = true;
 			randomDiffuseMaterial.ambient = vec3 (0.5 * frand (), 0.5 * frand (), 0.5 * frand ());
-			randomDiffuseMaterial.diffuse = vec3 (frand () * 0.5 + 0.2, frand () * 0.5 + 0.2, frand () * 0.5 + 0.2);
-			randomDiffuseMaterial.specular = vec3 (frand () * 0.4 + 0.2, frand () * 0.4 + 0.2, frand () * 0.5 + 0.2);
+			randomDiffuseMaterial.diffuse = vec3 (frand () * 0.8 + 0.2, frand () * 0.8 + 0.2, frand () * 0.8 + 0.2);
+			randomDiffuseMaterial.specular = vec3 (frand () * 0.8 + 0.2, frand () * 0.8 + 0.2, frand () * 0.8 + 0.2);
 			randomDiffuseMaterial.shininess = 250.0 * frand () + 20.0;
 
 			materials.push_back (randomDiffuseMaterial);
@@ -513,12 +620,12 @@ struct RayTracingGame {
 
 		for (int i = 0; i < numSpheres; i++) {
 
-			Sphere s;
-			s.center = vec3 ( frand () * 0.5 - 0.25, frand () * 0.5 - 0.25, 15.0 + 3.0 * frand () );
-			s.radius = 0.08 + frand () * 0.08;
-			s.materialId = 3 + i;
+			Ellipsoid e;
+			e.center = vec3 ( frand () * 0.5 - 0.25, frand () * 0.5 - 0.25, 12.0 + 3.0 * frand () );
+			e.radius = vec3 ( 0.12 + frand () * 0.12, 0.12 + frand () * 0.12, 0.12 + frand () * 0.12 );
+			e.materialId = 3 + i;
 
-			spheres.push_back (s);
+			ellipsoids.push_back (e);
 
 		}
 
@@ -526,9 +633,9 @@ struct RayTracingGame {
 
 	void CreateLight () {
 
-		light.direction = vec3 (0.0, 0.0, 1.0);
+		light.direction = vec3 (0.0, 0.0, -1.0);
 		light.ambient = vec3 (0.5, 0.5, 0.5);
-		light.energy = vec3 (10.0, 10.0, 10.0);
+		light.energy = vec3 (2.0, 2.0, 2.0);
 
 	}
 
@@ -563,6 +670,22 @@ struct RayTracingGame {
 		int location = glGetUniformLocation (gpuProgram.getId (), "numSpheres");
 		if (location >= 0) {
 			glUniform1i (location, spheres.size ());
+		}
+
+		for (int i = 0; i < ellipsoids.size (); i++) {
+
+			auto &e = ellipsoids [i];
+			e.SetUniforms (
+				gpuProgram.getId (),
+				"ellipsoids[%d].%s",
+				i
+			);
+
+		}
+
+		location = glGetUniformLocation (gpuProgram.getId (), "numEllipsoids");
+		if (location >= 0) {
+			glUniform1i (location, ellipsoids.size ());
 		}
 
 	}
@@ -677,9 +800,19 @@ struct RayTracingGame {
 
 		gameTime += delta;
 
-		for (auto &sp : spheres) {
+		for (auto &e : ellipsoids) {
 
-			sp.center = sp.center + (vec2 (frand () * 1.0 - 0.5, frand () * 1.0 - 0.5) * delta);
+			e.velocity = e.velocity + vec3 (frand (), frand (), 0.0) * delta;
+			
+			if (abs (e.center.x + e.velocity.x * delta) >= 1.0 - e.radius.x) {
+				e.velocity.x *= -1.0;
+			}
+
+			if (abs (e.center.y + e.velocity.y * delta) >= 1.0 - e.radius.y) {
+				e.velocity.y *= -1.0;
+			}
+			
+			e.center = e.center + e.velocity * delta;
 
 		}
 
